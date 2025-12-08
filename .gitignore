@@ -1,0 +1,14 @@
+# Віртуальне середовище
+.venv/
+venv/
+
+# Кеші Python
+__pycache__/
+*.pyc
+
+# Локальна база даних
+scanner.db
+
+# Файли IDE
+.vscode/
+.idea/
