@@ -70,7 +70,7 @@ def classify_host(open_ports: list[int]) -> str:
     return ", ".join(labels)
 
 
-def scan_network(network_cidr: str, ports=None) -> list[dict]:
+def scan_network(network_cidr: str, ports=None, progress_cb=None) -> list[dict]:
     """
     Сканує підмережу (наприклад, '192.168.0.0/24').
 
@@ -80,34 +80,47 @@ def scan_network(network_cidr: str, ports=None) -> list[dict]:
         "open_ports": [80, 443],
         "role": "web-сервер"
       }
+
+    Якщо передано progress_cb, то на кожній адресі викликає:
+        progress_cb(current, total, host_info)
+    де host_info = dict(...) для живого хоста або None, якщо пінг не відповів.
     """
     network = ipaddress.ip_network(network_cidr, strict=False)
     alive_hosts: list[dict] = []
 
+    all_ips = list(network.hosts())
+    total = len(all_ips)
+
     print("Сканування підмережі:", network_cidr)
 
-    for ip in network.hosts():     # перебираємо всі можливі адреси хостів
+    for idx, ip in enumerate(all_ips, start=1):
         ip_str = str(ip)
         print(f"Перевіряю {ip_str} ... ", end="")
 
-        if not ping_host(ip_str):
-            print("немає відповіді")
-            continue
+        host_info = None
 
-        # Хост живий → скануємо порти
-        open_ports = scan_ports(ip_str, ports)
-        role = classify_host(open_ports)
+        if ping_host(ip_str):
+            open_ports = scan_ports(ip_str, ports)
+            role = classify_host(open_ports)
 
-        if open_ports:
-            ports_str = ", ".join(str(p) for p in open_ports)
-            print(f"АКТИВНИЙ, порти: {ports_str} → {role}")
+            host_info = {
+                "ip": ip_str,
+                "open_ports": open_ports,
+                "role": role,
+            }
+
+            if open_ports:
+                ports_str = ", ".join(str(p) for p in open_ports)
+                print(f"АКТИВНИЙ, порти: {ports_str} → {role}")
+            else:
+                print(f"АКТИВНИЙ, але потрібних портів не знайдено → {role}")
+
+            alive_hosts.append(host_info)
         else:
-            print(f"АКТИВНИЙ, але потрібних портів не знайдено → {role}")
+            print("немає відповіді")
 
-        alive_hosts.append({
-            "ip": ip_str,
-            "open_ports": open_ports,
-            "role": role,
-        })
+        if progress_cb is not None:
+            progress_cb(idx, total, host_info)
 
     return alive_hosts
+

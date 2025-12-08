@@ -14,12 +14,10 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QMessageBox,
+    QProgressBar,
 )
 
 from scanner import scan_network
-
-# Якщо ти вже зробив storage.py за моїм попереднім кодом – імпортуй його
-# Якщо ще ні – тимчасово можеш закоментувати цей імпорт і виклики init_db/save_scan
 from storage import init_db, save_scan
 
 
@@ -28,6 +26,7 @@ class ScanWorker(QThread):
     Окремий потік для сканування, щоб не підвисав інтерфейс.
     """
     finished = Signal(list, str, datetime, datetime)  # hosts, network, started_at, finished_at
+    progress = Signal(int, int, object)  # current, total, host_info (dict або None)
 
     def __init__(self, network: str, parent=None):
         super().__init__(parent)
@@ -35,7 +34,13 @@ class ScanWorker(QThread):
 
     def run(self):
         started_at = datetime.now()
-        hosts = scan_network(self.network)  # використовуємо твою функцію
+
+        # Локальна функція, яку передамо в scanner.scan_network
+        # ВАЖЛИВО: scan_network має приймати параметр progress_cb
+        def progress_cb(current: int, total: int, host_info):
+            self.progress.emit(current, total, host_info)
+
+        hosts = scan_network(self.network, progress_cb=progress_cb)
         finished_at = datetime.now()
         self.finished.emit(hosts, self.network, started_at, finished_at)
 
@@ -46,19 +51,19 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Сканер локальної мережі (прототип диплома)")
         self.resize(800, 500)
 
-        # Ініціалізуємо БД (якщо storage підключений)
+        # Ініціалізуємо БД
         init_db()
 
         self.worker: ScanWorker | None = None
 
-        # --- Головний віджет і layout ---
+
         central = QWidget(self)
         self.setCentralWidget(central)
 
         main_layout = QVBoxLayout()
         central.setLayout(main_layout)
 
-        # --- Верхня панель: підмережа + кнопка ---
+
         top_layout = QHBoxLayout()
 
         self.network_label = QLabel("Підмережа:")
@@ -75,20 +80,28 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(top_layout)
 
-         # --- Таблиця з результатами ---
+
         self.table = QTableWidget()
         self.table.setColumnCount(3)
         self.table.setHorizontalHeaderLabels([
             "IP-адреса активного хоста",
             "Відкриті TCP-порти",
-            "Тип вузла / сервіси"
+            "Тип вузла / сервіси",
         ])
         self.table.horizontalHeader().setStretchLastSection(True)
 
-
         main_layout.addWidget(self.table)
 
-        # --- Статус + info внизу ---
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(1)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Готово.")
+        main_layout.addWidget(self.progress_bar)
+
+
         self.status_label = QLabel("Готово до сканування.")
         self.status_label.setAlignment(Qt.AlignLeft)
 
@@ -101,7 +114,7 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(bottom_layout)
 
-    # ---------- Обробники подій ----------
+
 
     def on_scan_clicked(self):
         network = self.network_input.text().strip()
@@ -112,16 +125,63 @@ class MainWindow(QMainWindow):
         # Блокуємо елементи на час сканування
         self.scan_button.setEnabled(False)
         self.network_input.setEnabled(False)
-        self.status_label.setText(f"Сканування {network} ...")
 
         # Очищаємо попередню таблицю
         self.table.setRowCount(0)
         self.scan_id_label.setText("")
 
+        # Скидаємо прогрес-бар
+        self.progress_bar.setRange(0, 0)  # невизначений прогрес, поки не знаємо total
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat(f"Сканування {network} ...")
+        self.status_label.setText(f"Сканування {network} ...")
+
         # Стартуємо потік зі сканером
         self.worker = ScanWorker(network)
         self.worker.finished.connect(self.on_scan_finished)
+        self.worker.progress.connect(self.on_scan_progress)
         self.worker.start()
+
+    def on_scan_progress(self, current: int, total: int, host_info):
+        """
+        Оновлення прогрес-бару під час сканування.
+        host_info = dict(...) для живого хоста або None, якщо пінг не відповів.
+        """
+        # Якщо ще не виставлено діапазон – виставляємо
+        if self.progress_bar.maximum() != total:
+            self.progress_bar.setRange(0, total)
+
+        self.progress_bar.setValue(current)
+        self.progress_bar.setFormat(f"Сканування: {current}/{total} адрес")
+        self.status_label.setText(
+            f"Сканування {self.network_input.text().strip() or 'підмережі'}: "
+            f"{current}/{total} адрес"
+        )
+
+        # Якщо хочеш показувати хости «на льоту», можна тут додавати рядки:
+        if host_info is not None and isinstance(host_info, dict):
+            ip = host_info.get("ip", "")
+            ports = host_info.get("open_ports", [])
+            role = host_info.get("role", "")
+
+            ports_str = ", ".join(str(p) for p in ports) if ports else "—"
+            role_str = role if role else "—"
+
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+
+            ip_item = QTableWidgetItem(ip)
+            ip_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+
+            ports_item = QTableWidgetItem(ports_str)
+            ports_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+
+            role_item = QTableWidgetItem(role_str)
+            role_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+
+            self.table.setItem(row, 0, ip_item)
+            self.table.setItem(row, 1, ports_item)
+            self.table.setItem(row, 2, role_item)
 
     def on_scan_finished(self, hosts, network, started_at, finished_at):
         """
@@ -129,12 +189,29 @@ class MainWindow(QMainWindow):
 
         hosts – список словників:
             { "ip": "...", "open_ports": [...], "role": "..." }
+        або список рядків – тоді ми нормалізуємо.
         """
+        # Нормалізація формату hosts
+        normalized_hosts = []
+        for h in hosts:
+            if isinstance(h, dict):
+                normalized_hosts.append(h)
+            else:
+                normalized_hosts.append({
+                    "ip": str(h),
+                    "open_ports": [],
+                    "role": "",
+                })
+        hosts = normalized_hosts
+
         # Розблоковуємо кнопки
         self.scan_button.setEnabled(True)
         self.network_input.setEnabled(True)
 
-        # Заповнюємо таблицю
+        # Якщо ми не додавали хости "на льоту", можна
+        # перезаповнити таблицю тут (на випадок змін)
+        # Спочатку очищаємо, щоб не було дубляжу
+        self.table.setRowCount(0)
         self.table.setRowCount(len(hosts))
         for row, host in enumerate(hosts):
             ip = host.get("ip", "")
@@ -157,6 +234,11 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 1, ports_item)
             self.table.setItem(row, 2, role_item)
 
+        # Завершуємо прогрес-бар
+        self.progress_bar.setRange(0, len(hosts) if hosts else 1)
+        self.progress_bar.setValue(len(hosts))
+        self.progress_bar.setFormat("Сканування завершено.")
+
         # Зберігаємо в БД
         scan_id = save_scan(network, started_at, finished_at, hosts)
 
@@ -171,8 +253,6 @@ class MainWindow(QMainWindow):
             )
 
         self.scan_id_label.setText(f"ID останнього скану: {scan_id}")
-
-
 
 
 def run_app():
